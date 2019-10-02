@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/cloudfoundry/bosh-cli/release/manifest"
 	yaml "gopkg.in/yaml.v2"
@@ -16,6 +17,11 @@ import (
 type Release struct {
 	filename string
 	tgz      *tar.Reader
+}
+
+type Manifest struct {
+	bytes  []byte
+	header *tar.Header
 }
 
 func main() {
@@ -42,7 +48,8 @@ func main() {
 		}
 		releases = append(releases, Release{filename: r, tgz: tar.NewReader(gzf)})
 	}
-	var manifests [][]byte
+	var manifests []Manifest
+	uniqueEntries := map[string]string{}
 	for _, r := range releases {
 		for {
 			header, err := r.tgz.Next()
@@ -56,8 +63,14 @@ func main() {
 				if err != nil {
 					log.Fatalf("Error reading manifest in %v: %v", r.filename, err)
 				}
-				manifests = append(manifests, bs)
+				manifests = append(manifests, Manifest{bytes: bs, header: header})
 			} else {
+				if old, found := uniqueEntries[header.Name]; found {
+					if header.Typeflag != tar.TypeDir {
+						log.Fatalf("Found duplicated file %q present in both %v and %v", header.Name, old, r.filename)
+					}
+				}
+				uniqueEntries[header.Name] = r.filename
 				if err := output.WriteHeader(header); err != nil {
 					log.Fatalf("Error writing tar header: %v", err)
 				}
@@ -71,7 +84,7 @@ func main() {
 	var final manifest.Manifest
 	for _, m := range manifests {
 		var parsed manifest.Manifest
-		if err := yaml.Unmarshal(m, &parsed); err != nil {
+		if err := yaml.Unmarshal(m.bytes, &parsed); err != nil {
 			log.Fatalf("Error parsing release manifest: %v", err)
 		}
 		final.CommitHash = parsed.CommitHash
@@ -89,9 +102,14 @@ func main() {
 	}
 
 	if err := output.WriteHeader(&tar.Header{
-		Name: "./release.MF",
-		Size: int64(len(bs)),
-		Mode: 0644,
+		Name:    "./release.MF",
+		Size:    int64(len(bs)),
+		Mode:    manifests[0].header.Mode,
+		Uid:     manifests[0].header.Uid,
+		Gid:     manifests[0].header.Gid,
+		Uname:   manifests[0].header.Uname,
+		Gname:   manifests[0].header.Gname,
+		ModTime: time.Now(),
 	}); err != nil {
 		log.Fatalf("Error writing tar header: %v", err)
 	}
